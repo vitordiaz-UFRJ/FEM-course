@@ -6,6 +6,8 @@ c       1 - T3  Estado Plano de Deformacoes (EPD)
 c       2 - T3  Estado Plano de Tensoes    (EPT)
 c       3 - Q4  Estado Plano de Deformacoes (EPD)
 c       4 - Q4  Estado Plano de Tensoes    (EPT)
+c       5 - T3  Problema de potencial
+c       6 - T3  Axissimetrico 
 c
 c     Solver: Gradiente Conjugado Precondicionado (PCG)
 c             com precondicionador diagonal (Jacobi)
@@ -65,8 +67,8 @@ c
         print*, '*** ERRO: nen deve ser 3 (T3) ou 4 (Q4). Lido:', nen
         stop
       endif
-      if (ndf .ne. 2 .or. ndm .ne. 2) then
-        print*, '*** ERRO: programa valido apenas para 2D (ndf=2,ndm=2)'
+      if (ndm .ne. 2) then
+        print*, '*** ERRO: programa valido apenas para 2D (ndm=2)'
         stop
       endif
 c
@@ -457,10 +459,12 @@ c       iel = 1 => T3 Estado Plano de Deformacoes (EPD)
 c       iel = 2 => T3 Estado Plano de Tensoes    (EPT)
 c       iel = 3 => Q4 Estado Plano de Deformacoes (EPD)
 c       iel = 4 => Q4 Estado Plano de Tensoes    (EPT)
+c       iel = 5 => T3 Conducao de calor 2D
+c       iel = 6 => T3 Axissimetrico
 c ======================================================================
       integer nel,iel,ndm,nst,isw
       real*8 e(*),xl(*),ul(*),fl(*),sl(*)
-      goto (100,200,300,400) iel
+      goto (100,200,300,400,500,600) iel
       print*, '*** ERRO elmlib: tipo de elemento ',iel,
      .        ' nao existe. Elemento: ',nel
       stop
@@ -471,6 +475,10 @@ c ======================================================================
   300 call elmt03(e,xl,ul,fl,sl,nel,ndm,nst,isw,nin)
       return
   400 call elmt04(e,xl,ul,fl,sl,nel,ndm,nst,isw,nin)
+      return
+  500 call elmt01_t(e,xl,ul,fl,sl,nel,ndm,nst,isw,nin)
+      return
+  600 call elmt01_axi(e,xl,ul,fl,sl,nel,ndm,nst,isw,nin)
       return
       end
 
@@ -916,6 +924,180 @@ c
       end
 
 c ======================================================================
+      subroutine elmt01_t(e,x,u,p,s,nel,ndm,nst,isw,nin)
+c     Elemento triangular linear T3
+c     Hipotese: Conducao de calor 2D (equacao do calor) 
+c     Parametros do material: k ( condutividade termica)
+c
+c ======================================================================
+      integer nel,ndm,nst,isw
+      real*8  e(*),x(ndm,*),u(nst),p(nst),s(nst,nst)
+      real*8  det,xj11,xj12,xj21,xj22,hx(3),hy(3)
+      real*8  xji11,xji12,xji21,xji22,d11,d12,d21,d22,d33
+      real*8  difus,wt
+      goto (100,200) isw
+c
+c     isw=1: leitura das constantes fisicas do material
+c
+  100 continue
+      read(nin,*) e(3)
+      return
+c
+c     isw=2: calculo da matriz de rigidez
+c
+c     Matriz Jacobiana:
+c       J = | x1-x3  y1-y3 |    det(J) = 2 * Area do triangulo
+c           | x2-x3  y2-y3 |
+c
+  200 continue
+      xj11 = x(1,1)-x(1,3)
+      xj12 = x(2,1)-x(2,3)
+      xj21 = x(1,2)-x(1,3)
+      xj22 = x(2,2)-x(2,3)
+      det  = xj11*xj22-xj12*xj21
+      if (det .le. 0.d0) goto 1000
+c
+c     Inversa da matriz Jacobiana:
+c
+      xji11 =  xj22/det
+      xji12 = -xj12/det
+      xji21 = -xj21/det
+      xji22 =  xj11/det
+c
+c     Derivadas das funcoes de interpolacao em relacao a x e y:
+c       hx(i) = dN_i/dx,  hy(i) = dN_i/dy
+c
+      hx(1) =  xji11
+      hx(2) =  xji12
+      hx(3) = -xji11-xji12
+      hy(1) =  xji21
+      hy(2) =  xji22
+      hy(3) = -xji21-xji22
+c
+      difus  = e(3)
+c
+c       wt = Area do triangulo = det/2
+c
+      wt = 0.5d0*det
+      do 220 j = 1, 3
+        do 210 i = 1, 3
+c         s(i,j)     += difus*(dNi/dx*dNj/dx + dNi/dy*dNj/dy)*A
+          s(i,j)     = ( hx(i)*difus*hx(j) + hy(i)*difus*hy(j) ) * wt
+  210   continue
+  220 continue
+c
+c     Vetor de forcas internas: p = Ke * u
+c
+      call lku(s,u,p,nst)
+      return
+ 1000 continue
+      print*, '*** ERRO elmt01_t: det nulo ou negativo no elemento', nel
+      print*, '    Verifique a ordem dos nos (deve ser anti-horaria).'
+      stop
+      end
+c ======================================================================
+      subroutine elmt01_axi(e,x,u,p,s,nel,ndm,nst,isw,nin)
+c     Elemento triangular linear T3
+c     Hipotese: Axissimetrico
+c     Parametros do material: E (modulo de Young), nu (Poisson)
+c
+c     Matriz constitutiva EPD:
+c       c = E(1-nu)/[(1+nu)(1-2nu)]
+c       D = | c          c*nu/(1-nu)  0           c*nu/(1-nu) |     |
+c           | c*nu/(1-nu)  c          0           c*nu/(1-nu) |
+c           | 0            0    E/[2(1+nu)]             0     |
+c           | c*nu/(1-nu)  c*nu/(1-nu)  0               c     |      
+c ======================================================================
+      integer nel,ndm,nst,isw
+      real*8  e(*),x(ndm,*),u(nst),p(nst),s(nst,nst)
+      real*8  det,xj11,xj12,xj21,xj22,hx(4),hy(4)
+      real*8  xji11,xji12,xji21,xji22,d11,d12,d21,d22,d33
+      real*8  my,nu,a,b,c,wt
+      real*8   PI
+      parameter (PI = 3.1415926535)
+      goto (100,200) isw
+c
+c     isw=1: leitura das constantes fisicas do material
+c
+  100 continue
+      read(nin,*) e(1),e(2)
+      return
+c
+c     isw=2: calculo da matriz de rigidez
+c
+c     Matriz Jacobiana:
+c       J = | x1-x3  y1-y3 |    det(J) = 2 * Area do triangulo
+c           | x2-x3  y2-y3 |
+c
+  200 continue
+      xj11 = x(1,1)-x(1,3)
+      xj12 = x(2,1)-x(2,3)
+      xj21 = x(1,2)-x(1,3)
+      xj22 = x(2,2)-x(2,3)
+      det  = xj11*xj22-xj12*xj21
+      raio = 1/3.d0*(x(1,1)+x(1,2)+x(1,3))
+      if (det .le. 0.d0) goto 1000
+c
+c     Inversa da matriz Jacobiana:
+c
+      xji11 =  xj22/det
+      xji12 = -xj12/det
+      xji21 = -xj21/det
+      xji22 =  xj11/det
+c
+c     Derivadas das funcoes de interpolacao em relacao a r e z:
+c       hx(i) = dN_i/dr,  hy(i) = dN_i/dz
+c
+      hx(1) =  xji11
+      hx(2) =  xji12
+      hx(3) = -xji11-xji12
+      hy(1) =  xji21
+      hy(2) =  xji22
+      hy(3) = -xji21-xji22
+c
+c     Matriz constitutiva D (problema axissimetrico):
+c
+      my  = e(1)
+      nu  = e(2)
+      a   = 1.d0+nu
+      b   = a*(1.d0-2.d0*nu)
+      c   = my*(1.d0-nu)/b
+      d11 = c
+      d12 = my*nu/b
+      d21 = d12
+      d22 = c
+      d33 = my/(2.d0*a)
+c
+c     Matriz de rigidez: Ke = 2 * pi * B^T D B * r * det/2
+c       wt = Area do triangulo = det/2
+c
+      wt = 2.d0*PI*0.5d0*raio*det
+      do 220 j = 1, 3
+        k = (j-1)*2+1
+        do 210 i = 1, 3
+          l = (i-1)*2+1
+c         s(l,k)     += (dNi/dx*d11*dNj/dx + dNi/dy*d33*dNj/dy)*A
+          s(l,k)     = ( hx(i)*d11*hx(j) + hy(i)*d33*hy(j) ) * wt
+c         s(l,k+1)   += (dNi/dx*d12*dNj/dy + dNi/dy*d33*dNj/dx)*A
+          s(l,k+1)   = ( hx(i)*d12*hy(j) + hy(i)*d33*hx(j) ) * wt
+c         s(l+1,k)   += (dNi/dy*d21*dNj/dx + dNi/dx*d33*dNj/dy)*A
+          s(l+1,k)   = ( hy(i)*d21*hx(j) + hx(i)*d33*hy(j) ) * wt
+c         s(l+1,k+1) += (dNi/dy*d22*dNj/dy + dNi/dx*d33*dNj/dx)*A
+          s(l+1,k+1) = ( hy(i)*d22*hy(j) + hx(i)*d33*hx(j) ) * wt
+  210   continue
+  220 continue
+c
+c     Vetor de forcas internas: p = Ke * u
+c
+      call lku(s,u,p,nst)
+      return
+ 1000 continue
+      print*, '*** ERRO elmt01: det nulo ou negativo no elemento', nel
+      print*, '    Verifique a ordem dos nos (deve ser anti-horaria).'
+      stop
+      end
+
+c ======================================================================
       subroutine actcol(a,b,jdiag,neq,afac,back)
 c ======================================================================
 c     Solver direto: decomposicao LtDL com armazenamento skyline.
@@ -1292,20 +1474,36 @@ c
           write(nvtk,'(i2)') 9
   350   continue
       endif
+      if (ndf .eq. 2) then
 c
 c     Dados nodais: deslocamentos (u_x, u_y, u_z com z=0)
 c
-      write(nvtk,'(a,i8)') 'POINT_DATA ', nnode
-      write(nvtk,'(a)') 'VECTORS Deslocamentos float'
-      do 400 i = 1, nnode
-        aux(1) = f(1,i)
-        aux(2) = f(2,i)
-        aux(3) = 0.0d0
-        k = id(1,i)
-        if (k .gt. 0) aux(1) = u(k)
-        k = id(2,i)
-        if (k .gt. 0) aux(2) = u(k)
-        write(nvtk,'(3e16.8)') aux(1), aux(2), aux(3)
-  400 continue
-      return
+         write(nvtk,'(a)') 'VECTORS Deslocamentos float'
+         write(nvtk,'(a,i8)') 'POINT_DATA ', nnode
+         do 400 i = 1, nnode
+           aux(1) = f(1,i)
+           aux(2) = f(2,i)
+           aux(3) = 0.0d0
+           k = id(1,i)
+           if (k .gt. 0) aux(1) = u(k)
+           k = id(2,i)
+           if (k .gt. 0) aux(2) = u(k)
+           write(nvtk,'(3e16.8)') aux(1), aux(2), aux(3)
+  400    continue
+         return
+      elseif (ndf .eq. 1) then
+c
+c     Dados nodais: temperatura
+c
+         write(nvtk,'(a,i8)') 'POINT_DATA ', nnode
+         write(nvtk,'(a)') 'SCALARS Temperatura float'
+         write(nvtk,'(a)') 'LOOKUP_TABLE default'
+         do 500 i = 1, nnode
+           aux(1) = f(1,i)
+           k = id(1,i)
+           if (k .gt. 0) aux(1) = u(k)
+           write(nvtk,'(1e16.8)') aux(1)
+  500    continue
+         return
+      endif
       end
